@@ -1,0 +1,72 @@
+#!/bin/sh
+
+VALGRIND="valgrind -q --leak-check=full --leak-resolution=high --show-leak-kinds=all"
+
+MYTMP=
+cleanup() {
+	rm -fr "${MYTMP}"
+}
+trap cleanup 0
+
+die() {
+	local m="$1"
+	echo "FATAL: ${m}" >&2
+	exit 1
+}
+
+msg() {
+	local m="$1"
+	cat << __EOF__
+------------------------------------------------------------------------------------------------------------------
+| ${m}
+------------------------------------------------------------------------------------------------------------------
+__EOF__
+}
+
+check() {
+	local do_valgrind="$1"; shift
+	local do_sleep="$1"; shift
+	local out="${MYTMP}/out.tmp"
+
+	$([ "${do_valgrind}" -eq 1 ] && echo "${VALGRIND}") \
+		./fuse-leak -f "${MNT}" 2>&1 | tee "${out}" &
+	pid=$!
+
+	while [ "$(ls "${MNT}" | wc -l)" -eq 0 ]; do
+		kill -0 "${pid}" || die "fuse died"
+		sleep 1
+	done
+
+	(
+		_MNT="${MNT}"
+		_do_sleep="${do_sleep}"
+		cleanup1() {
+			[ "${_do_sleep}" -eq 1 ] && sleep 2
+			fusermount3 -u "${_MNT}"
+		}
+		trap cleanup1 0
+
+		cat "${MNT}/file1"
+	)
+
+	while kill -0 "${pid}" 2> /dev/null; do
+		sleep 1
+	done
+
+	grep -q release "${out}" || echo "FAIL: No release!"
+}
+
+MYTMP="$(mktemp -d)"
+MNT="${MYTMP}/mnt"
+mkdir -p "${MNT}"
+
+msg "Check with no valgrind, usually releases..."
+check 0 0
+
+msg "Check with valgrind, usually fail to release, termination race..."
+check 1 0
+
+msg "Check with valgrind and sleep before umount, usually releases.. this proves there is a race..."
+check 1 1
+
+exit 0
